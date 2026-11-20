@@ -54,6 +54,11 @@ const PANE = {
 
 const PROJECT = 'C:/proj'
 
+/** 桌面版最上面那張任務顯示幕的文字說明（裡面有防線數、擋下次數） */
+async function display(ui: { find: (query: { type: string }) => Promise<{ props: Record<string, unknown> } | undefined> }) {
+  return String((await ui.find({ type: 'Svg' }))?.props.alt ?? '')
+}
+
 /** 底下的引擎：筆記本、專案檔案、家目錄、store、時鐘、指令都從記憶體回答 */
 function world(
   on: On,
@@ -166,7 +171,7 @@ test('【驗收】Claude 寫出違規程式碼時被擋下，正確寫法放行'
   expect(allowed.deny).toBeUndefined()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /已擋下 1 次/ })).toBeDefined()
+  expect(await display(ui)).toContain('已擋下 1 次')
   await ui.unmount()
 })
 
@@ -216,7 +221,7 @@ test('【驗收】新規定上鎖：動畫跑完，自動示範擋下效果', as
   await $.session.start({ cwd: PROJECT, surface: 'desktop', isInteractive: true })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /🛡 0 條防線/ })).toBeDefined()
+  expect(await display(ui)).toContain('0 條防線生效中')
 
   // Claude 記好第 2 筆（有擋下規則），重讀筆記本
   text = BOOK
@@ -226,7 +231,7 @@ test('【驗收】新規定上鎖：動畫跑完，自動示範擋下效果', as
 
   await clock.advance(260 * 5)
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /🛡 1 條防線/ })).toBeDefined()
+  expect(await display(ui)).toContain('1 條防線生效中')
   expect(await ui.find({ type: 'Text', text: /錯的擋下，對的放行/ })).toBeDefined()
   await ui.unmount()
 })
@@ -260,10 +265,10 @@ test('【功能】跑驗證：9 種驗證逐項回報，同一個指令只跑一
   await ui.press({ key: 'run-checks' })
 
   expect((await ui.find({ type: 'Text', text: /靜態分析/ }))?.text).toContain('1 處違反防線：app.ts:2（#2）')
-  expect((await ui.find({ type: 'Text', text: /冒煙測試/ }))?.text).toContain('✓')
+  expect((await ui.find({ type: 'Text', text: /冒煙測試/ }))?.text).toContain('GO')
   expect((await ui.find({ type: 'Text', text: /單元測試/ }))?.text).toContain('2 個通過')
   expect((await ui.find({ type: 'Text', text: /回歸測試/ }))?.text).toContain('1 個失敗：按 Enter 也能送出')
-  expect(await ui.find({ type: 'Text', text: /上次 \d\d:\d\d/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /LAST \d\d:\d\d/ })).toBeDefined()
   // 單元和回歸共用同一個測試指令，只跑一次
   expect(runs.length).toBe(2)
   await ui.unmount()
@@ -287,7 +292,13 @@ test('【畫面】四種介面都畫得出面板的主要元素', async ($, on) 
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /🛡 1 條防線/ })).toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ type: 'Text', text: /01 ARMED/ })).toBeDefined()
+    } else {
+      const svg = await ui.find({ type: 'Svg' })
+      expect(svg?.props.alt).toContain('1 條防線生效中')
+      expect(String(svg?.props.source)).toContain('GUARDS ARMED')
+    }
     expect(await ui.find({ type: 'Input', key: 'what' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'rule-2' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'run-checks' })).toBeDefined()
@@ -359,12 +370,18 @@ test('【單元】設定檔格式不對的部分會被略過', async () => {
       smoke: { run: [] },
       lint: { run: ['eslint'], cwd: 'sub' },
       static: { run: ['tsc'] },
+      mutation: { run: ['node', 'mutate.mjs'], timeoutMs: 600000 },
+      ui: { run: ['e2e'], timeoutMs: 0 },
+      acceptance: { run: ['e2e'], timeoutMs: '5' },
     },
   })
   const plan = parseCheckFile(text, PROJECT)
 
   expect(plan?.scan).toBe('D:/other')
-  expect(Object.keys(plan?.specs ?? {})).toEqual(['lint', 'static'])
+  expect(Object.keys(plan?.specs ?? {})).toEqual(['lint', 'static', 'mutation', 'ui', 'acceptance'])
+  expect(plan?.specs.mutation?.timeoutMs).toBe(600000)
+  expect(plan?.specs.ui?.timeoutMs).toBeUndefined()
+  expect(plan?.specs.acceptance?.timeoutMs).toBeUndefined()
   expect(plan?.specs.lint).toEqual({ run: ['eslint'], cwd: 'sub' })
   expect(Object.keys(plan?.specs.static ?? {})).toEqual(['run'])
   expect(parseCheckFile('5', PROJECT)).toBeNull()

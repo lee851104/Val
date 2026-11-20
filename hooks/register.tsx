@@ -1,5 +1,6 @@
 import { atom, read, update, type EngineInterface, type Register } from 'claude-code'
 
+import { missionSvg, type Lamp } from './mission'
 import type { Book, CheckKind, CheckResult, Checks, Demo, Entry, Flash, Guard, LastBlock } from '../types'
 
 const PANE = 'fixnote'
@@ -16,7 +17,7 @@ const SKIP_DIRS = new Set([
   '__pycache__', '.claude-plugin', 'tests', 'test', '__tests__',
 ])
 const SCAN_LIMIT = 2000
-const LOCK_FRAMES = ['上鎖中 ○○○', '上鎖中 ●○○', '上鎖中 ●●○', '上鎖中 ●●●', '已上鎖']
+const LOCK_FRAMES = ['ARMING ▱▱▱  上鎖中', 'ARMING ▰▱▱  上鎖中', 'ARMING ▰▰▱  上鎖中', 'ARMING ▰▰▰  上鎖中', 'ARMED  已上鎖']
 const STRENGTH: Record<string, string> = {
   擋下: '寫了會被當場擋下',
   抓到: '寫錯時測試會失敗',
@@ -172,19 +173,21 @@ function baseName(path: string): string {
 // ---------- 驗證設定 ----------
 
 /** 9 種預設驗證：照片裡選定的那幾種，名稱和一句話說明 */
-export const KINDS: { id: CheckKind; name: string; hint: string }[] = [
-  { id: 'lint', name: 'lint 規則', hint: '自動掃描程式，抓出禁止的寫法' },
-  { id: 'static', name: '靜態分析', hint: '不執行程式就找出問題，含防線掃描' },
-  { id: 'unit', name: '單元測試', hint: '測一個小函式的輸入和輸出' },
-  { id: 'functional', name: '功能測試', hint: '測一個完整功能有沒有照需求運作' },
-  { id: 'regression', name: '回歸測試', hint: '修好的 bug 不會再回來' },
-  { id: 'acceptance', name: '驗收測試', hint: '把你的需求寫成測試' },
-  { id: 'smoke', name: '冒煙測試', hint: '程式能不能啟動、載入' },
-  { id: 'ui', name: '畫面測試', hint: '操作畫面，確認看到的東西對' },
-  { id: 'mutation', name: '變異測試', hint: '故意改壞程式，看測試抓不抓得到' },
+export const KINDS: { id: CheckKind; code: string; name: string; hint: string }[] = [
+  { id: 'lint', code: 'LINT', name: 'lint 規則', hint: '自動掃描程式，抓出禁止的寫法' },
+  { id: 'static', code: 'STATIC', name: '靜態分析', hint: '不執行程式就找出問題，含防線掃描' },
+  { id: 'unit', code: 'UNIT', name: '單元測試', hint: '測一個小函式的輸入和輸出' },
+  { id: 'functional', code: 'FUNC', name: '功能測試', hint: '測一個完整功能有沒有照需求運作' },
+  { id: 'regression', code: 'REGRESS', name: '回歸測試', hint: '修好的 bug 不會再回來' },
+  { id: 'acceptance', code: 'ACCEPT', name: '驗收測試', hint: '把你的需求寫成測試' },
+  { id: 'smoke', code: 'SMOKE', name: '冒煙測試', hint: '程式能不能啟動、載入' },
+  { id: 'ui', code: 'UI', name: '畫面測試', hint: '操作畫面，確認看到的東西對' },
+  { id: 'mutation', code: 'MUTATE', name: '變異測試', hint: '故意改壞程式，看測試抓不抓得到' },
 ]
 
-export type CheckSpec = { run: string[]; cwd?: string; match?: string }
+export type CheckSpec = { run: string[]; cwd?: string; match?: string; timeoutMs?: number }
+/** 每項驗證最多跑多久；跑比較久的（例如變異測試）可以在 checks.json 用 timeoutMs 調高 */
+const DEFAULT_TIMEOUT = 180_000
 export type CheckPlan = { scan: string; specs: Partial<Record<CheckKind, CheckSpec>> }
 
 function isKind(id: string): id is CheckKind {
@@ -195,7 +198,7 @@ function toSpec(value: unknown): CheckSpec | null {
   if (value === null || typeof value !== 'object') {
     return null
   }
-  const one = value as { run?: unknown; cwd?: unknown; match?: unknown }
+  const one = value as { run?: unknown; cwd?: unknown; match?: unknown; timeoutMs?: unknown }
   if (!Array.isArray(one.run) || one.run.length === 0) {
     return null
   }
@@ -204,6 +207,7 @@ function toSpec(value: unknown): CheckSpec | null {
     run: one.run.filter((part): part is string => typeof part === 'string'),
     ...(typeof one.cwd === 'string' ? { cwd: one.cwd } : {}),
     ...(typeof one.match === 'string' ? { match: one.match } : {}),
+    ...(typeof one.timeoutMs === 'number' && one.timeoutMs > 0 ? { timeoutMs: one.timeoutMs } : {}),
   }
 }
 
@@ -548,10 +552,13 @@ async function runChecks($: EngineInterface): Promise<void> {
       return hit
     }
     let ran: RunOutcome
+    const limit = spec.timeoutMs ?? DEFAULT_TIMEOUT
     try {
-      ran = await $.process.run(spec.run, { cwd: spec.cwd ?? (sessionCwd || undefined), timeoutMs: 180_000 })
+      ran = await $.process.run(spec.run, { cwd: spec.cwd ?? (sessionCwd || undefined), timeoutMs: limit })
     } catch (err) {
-      ran = `跑不起來：${String(err).slice(0, 50)}`
+      ran = /time/i.test(String(err))
+        ? `超過 ${Math.round(limit / 60_000)} 分鐘沒跑完，可在 checks.json 加 timeoutMs 調高`
+        : `跑不起來：${String(err).slice(0, 50)}`
     }
     cache.set(key, ran)
 
@@ -668,13 +675,21 @@ export const register: Register = on => {
 
     return (
       <Text>
-        <Text color="green">🛡 已擋下</Text> {last.rule} <Text dimColor>· {last.file}</Text>
+        <Text color="green" mono weight="bold">
+          ● INTERCEPTED
+        </Text>{' '}
+        已擋下 {last.rule} <Text dimColor>· {last.file}</Text>
       </Text>
     )
   })
 
+  // 面板：任務控制台的樣子。英文大寫是區塊名稱，旁邊的中文是白話說明
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Input, Text } = $.ui.resolve(e)
+    const table = $.ui.resolve(e)
+    const { Box, Button, Input, Text } = table
+    // 桌面版、VS Code、手機有 Svg，最上面畫會動的任務顯示幕；終端機沒有，用文字版。
+    // 終端機的元素表也查得到 Svg（只是什麼都不畫），所以要看介面種類，不能只看有沒有這個元素
+    const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined
     const value = await read($, draft)
     const b = await read($, book)
     const g = await read($, guard)
@@ -694,42 +709,144 @@ export const register: Register = on => {
     const warning = [...repeats].find(([category, n]) => n >= REPEAT && !guarded.has(category))
     const isLocking = anim !== null && anim.frame < LOCK_FRAMES.length - 1
 
+    const passed = c.results.filter(one => one.ok).length
+    const failed = c.results.length - passed
+    const status =
+      failed > 0
+        ? { text: '● FAULT', color: 'red' }
+        : c.results.length > 0
+          ? { text: '● NOMINAL', color: 'green' }
+          : { text: '○ STANDBY', color: undefined }
+
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const lampOf = (kind: CheckKind): Lamp => {
+      if (!c.configured.includes(kind)) {
+        return 'off'
+      }
+      if (c.isRunning && c.current === kind) {
+        return 'run'
+      }
+      const result = c.results.find(one => one.kind === kind)
+      if (result === undefined) {
+        return 'wait'
+      }
+
+      return result.ok ? 'go' : 'fault'
+    }
+    const mission = missionSvg({
+      armed: active.length,
+      blocks: totalBlocks,
+      checks: KINDS.map(kind => ({ code: kind.code, lamp: lampOf(kind.id) })),
+      status: failed > 0 ? 'fault' : c.results.length > 0 ? 'nominal' : 'standby',
+      isArming: isLocking,
+      ranAt: c.ranAt,
+    })
+    const missionAlt = `糾正筆記任務顯示幕：${active.length} 條防線生效中，已擋下 ${totalBlocks} 次，驗證 ${passed} 項通過、${failed} 項失敗`
+    const tiles = [
+      { key: 'tile-guards', value: pad(active.length), unit: 'ARMED', label: 'GUARDS  防線' },
+      { key: 'tile-blocks', value: pad(totalBlocks), unit: 'BLOCKED', label: 'INTERCEPTS  擋下' },
+      {
+        key: 'tile-checks',
+        value: c.results.length > 0 ? `${passed}/${c.configured.length}` : '—',
+        unit: 'GO',
+        label: 'CHECKS  驗證',
+      },
+    ]
+
     return (
       <Box flexDirection="column" gap={1}>
-        <Text>
-          <Text bold>🛡 {active.length} 條防線</Text>
-          <Text dimColor> · 已擋下 {totalBlocks} 次</Text>
-        </Text>
+        {Svg !== undefined ? (
+          <Svg source={mission} alt={missionAlt} />
+        ) : (
+          <Box flexDirection="column" gap={1}>
+            <Box justifyContent="space-between">
+              <Text>
+                <Text mono weight="bold">
+                  FIXNOTE
+                </Text>
+                <Text mono dimColor>
+                  {'  /  MISSION CONTROL'}
+                </Text>
+              </Text>
+              <Text mono weight="bold" color={status.color} dimColor={status.color === undefined}>
+                {status.text}
+              </Text>
+            </Box>
 
-        <Input
-          key="what"
-          placeholder="AI 做錯了什麼？一句話就好"
-          value={value}
-          submitLabel="記下"
-          autoFocus
-          onInput={text => void update($, draft, () => text)}
-          onSubmit={text => void send($, text)}
-        />
+            <Box gap={1}>
+              {tiles.map(tile => (
+                <Box
+                  key={tile.key}
+                  flexDirection="column"
+                  flexGrow={1}
+                  paddingX={1}
+                  borderStyle="single"
+                  borderDimColor
+                >
+                  <Text size="title" weight="bold" mono tabular>
+                    {tile.value}
+                    <Text size="caption" weight="regular" dimColor>
+                      {' '}
+                      {tile.unit}
+                    </Text>
+                  </Text>
+                  <Text size="caption" mono dimColor>
+                    {tile.label}
+                  </Text>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        )}
 
-        {b.error !== null && <Text color="red">讀不到筆記本：{b.error}</Text>}
+        <Box flexDirection="column">
+          <Text size="caption" mono dimColor>
+            LOG ENTRY  記一筆
+          </Text>
+          <Input
+            key="what"
+            placeholder="AI 做錯了什麼？一句話就好"
+            value={value}
+            submitLabel="LOG 記下"
+            autoFocus
+            onInput={text => void update($, draft, () => text)}
+            onSubmit={text => void send($, text)}
+          />
+        </Box>
+
+        {b.error !== null && (
+          <Text color="red">
+            <Text mono weight="bold">
+              ● FAULT
+            </Text>{' '}
+            讀不到筆記本：{b.error}
+          </Text>
+        )}
 
         {latest !== undefined && (
-          <Box flexDirection="column">
-            <Text dimColor>
-              #{latest.no} {latest.category}
+          <Box flexDirection="column" paddingX={1} borderStyle="single" borderDimColor>
+            <Text size="caption" mono dimColor>
+              LATEST  #{pad(latest.no)} · {latest.category}
             </Text>
             {isLocking && anim?.no === latest.no ? (
-              <Text color="green">{LOCK_FRAMES[anim.frame]}</Text>
+              <Text color="green" mono weight="bold">
+                {LOCK_FRAMES[anim.frame]}
+              </Text>
             ) : (
               latest.rule !== '' && (
                 <Text>
-                  {isLocked(latest) ? '🔒' : '·'} {latest.rule}
+                  {isLocked(latest) && (
+                    <Text color="green" mono weight="bold">
+                      {'ARMED  '}
+                    </Text>
+                  )}
+                  {latest.rule}
                 </Text>
               )
             )}
             {latest.strength !== '' && (
-              <Text dimColor>
-                {latest.strength}　{STRENGTH[latest.strength] ?? ''}
+              <Text size="caption" dimColor>
+                <Text mono>STRENGTH</Text>  {latest.strength} — {STRENGTH[latest.strength] ?? ''}
               </Text>
             )}
           </Box>
@@ -737,7 +854,9 @@ export const register: Register = on => {
 
         {locked.length > 0 && (
           <Box flexDirection="column">
-            <Text dimColor>防線</Text>
+            <Text size="caption" mono dimColor>
+              GUARDS  防線
+            </Text>
             {locked.map(entry => {
               const isPaused = g.paused.includes(entry.no)
               const isOpen = open !== null && open.no === entry.no
@@ -751,31 +870,47 @@ export const register: Register = on => {
                     dimColor={isPaused}
                     onPress={() => void toggleDemo($, entry)}
                   >
-                    {isPaused ? '⏸' : '🔒'} {shortRule(entry)} <Text dimColor>{hits > 0 ? `擋下 ${hits}` : ''}</Text>
+                    <Text color={isPaused ? undefined : 'green'} dimColor={isPaused} mono weight="bold">
+                      {isPaused ? '○ HOLD ' : '● ARMED'}
+                    </Text>{' '}
+                    {shortRule(entry)}
+                    <Text mono dimColor>
+                      {hits > 0 ? `  ×${hits}` : ''}
+                    </Text>
                   </Button>
                   {isOpen && (
-                    <Box flexDirection="column" paddingLeft={3}>
+                    <Box flexDirection="column" paddingLeft={2}>
                       {entry.bad !== '' && (
-                        <Text color={open.badBlocked ? 'green' : 'red'}>
-                          {open.badBlocked ? '✕' : '!'} <Text dimColor>{entry.bad}</Text>
+                        <Text>
+                          <Text color={open.badBlocked ? 'green' : 'red'} mono>
+                            {open.badBlocked ? 'BLOCK' : 'MISS '}
+                          </Text>{' '}
+                          <Text mono dimColor>
+                            {entry.bad}
+                          </Text>
                         </Text>
                       )}
                       {entry.good !== '' && (
-                        <Text color={open.goodBlocked ? 'red' : 'green'}>
-                          {open.goodBlocked ? '!' : '✓'} <Text dimColor>{entry.good}</Text>
+                        <Text>
+                          <Text color={open.goodBlocked ? 'red' : 'green'} mono>
+                            {open.goodBlocked ? 'FALSE' : 'PASS '}
+                          </Text>{' '}
+                          <Text mono dimColor>
+                            {entry.good}
+                          </Text>
                         </Text>
                       )}
-                      <Text dimColor>
+                      <Text size="caption" dimColor>
                         {open.badBlocked && !open.goodBlocked
-                          ? '錯的擋下，對的放行'
-                          : '規則不夠準，按「回顧」請 Claude 修正'}
+                          ? 'VERIFIED · 錯的擋下，對的放行'
+                          : 'CHECK RULE · 規則不夠準，按 DEBRIEF 請 Claude 修正'}
                       </Text>
                       <Box>
                         <Button
                           key={`pause-${entry.no}`}
                           plain
                           dimColor
-                          label={isPaused ? '恢復' : '暫停'}
+                          label={isPaused ? 'RESUME 恢復' : 'HOLD 暫停'}
                           onPress={() => void togglePause($, entry.no)}
                         />
                       </Box>
@@ -788,57 +923,83 @@ export const register: Register = on => {
         )}
 
         {warning !== undefined && (
-          <Text color="yellow">
+          <Text>
+            <Text color="yellow" mono weight="bold">
+              ▲ CAUTION
+            </Text>{' '}
             {warning[0]} 已出現 {warning[1]} 次，還沒上鎖
           </Text>
         )}
 
         <Box flexDirection="column">
-          <Box gap={2}>
-            <Text dimColor>驗證</Text>
-            {c.isRunning ? (
-              <Text dimColor>
-                正在跑：{KINDS.find(kind => kind.id === c.current)?.name ?? '準備中'}…
-              </Text>
-            ) : (
-              <Button key="run-checks" plain label="跑一次" onPress={() => void runChecks($)} />
-            )}
-            {c.ranAt !== '' && !c.isRunning && <Text dimColor>上次 {c.ranAt}</Text>}
+          <Box justifyContent="space-between">
+            <Text size="caption" mono dimColor>
+              PRE-FLIGHT CHECKS  驗證
+            </Text>
+            <Box gap={2}>
+              {c.ranAt !== '' && !c.isRunning && (
+                <Text size="caption" mono dimColor>
+                  LAST {c.ranAt}
+                </Text>
+              )}
+              {c.isRunning ? (
+                <Text size="caption" mono color="yellow">
+                  RUNNING · {KINDS.find(kind => kind.id === c.current)?.name ?? '準備中'}
+                </Text>
+              ) : (
+                <Button key="run-checks" plain label="RUN 跑一次" onPress={() => void runChecks($)} />
+              )}
+            </Box>
           </Box>
           {KINDS.map(kind => {
             const isSet = c.configured.includes(kind.id)
             const result = c.results.find(one => one.kind === kind.id)
+            const code = kind.code.padEnd(8)
             if (!isSet) {
               return (
                 <Box key={`check-${kind.id}`} gap={1}>
                   <Text dimColor>
-                    ○ {kind.name}　{kind.hint}
+                    <Text mono>{`○ OFF   ${code}`}</Text>
+                    {kind.name}　{kind.hint}
                   </Text>
                   <Button
                     key={`add-${kind.id}`}
                     plain
-                    label="加上"
+                    label="ADD 加上"
                     onPress={() => void $.prompt.submit({ text: addPrompt(kind.id) })}
                   />
                 </Box>
               )
             }
             if (result === undefined) {
+              const isNow = c.isRunning && c.current === kind.id
+
               return (
                 <Text>
-                  <Text dimColor>{c.isRunning && c.current === kind.id ? '…' : '·'}</Text> {kind.name}
+                  <Text mono color={isNow ? 'yellow' : undefined} dimColor={!isNow}>
+                    {isNow ? '◌ RUN   ' : '· WAIT  '}
+                    {code}
+                  </Text>
+                  {kind.name}
                   <Text dimColor>{c.isRunning ? '' : '　還沒跑'}</Text>
                 </Text>
               )
             }
+            const time = seconds(result.ms)
 
             return (
               <Text>
-                <Text color={result.ok ? 'green' : 'red'}>{result.ok ? '✓' : '✕'}</Text> {kind.name}
+                <Text mono weight="bold" color={result.ok ? 'green' : 'red'}>
+                  {result.ok ? '● GO    ' : '● FAULT '}
+                </Text>
+                <Text mono dimColor>
+                  {code}
+                </Text>
+                {kind.name}
                 <Text dimColor>
                   {'　'}
                   {result.detail}
-                  {seconds(result.ms) === '' ? '' : ` · ${seconds(result.ms)}`}
+                  {time === '' ? '' : ` · ${time}`}
                 </Text>
               </Text>
             )
@@ -850,7 +1011,7 @@ export const register: Register = on => {
             key="review"
             plain
             dimColor
-            label="回顧"
+            label="DEBRIEF 回顧"
             onPress={() => void $.prompt.submit({ text: '請用 fixnote skill 回顧糾正筆記。' })}
           />
         </Box>
