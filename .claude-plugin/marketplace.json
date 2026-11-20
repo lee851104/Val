@@ -1,0 +1,13 @@
+{
+  "name": "val",
+  "description": "糾正筆記 fixnote：把糾正 AI 變成寫死的規定",
+  "owner": {
+    "name": "lee851104"
+  },
+  "plugins": [
+    {
+      "name": "fixnote",
+      "source": "./"
+    }
+  ]
+}

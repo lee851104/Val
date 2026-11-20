@@ -1,0 +1,9 @@
+{
+  "name": "fixnote",
+  "version": "0.1.0",
+  "description": "糾正筆記：填一句話記下 AI 犯的錯，把它變成寫死的規定，之後 Claude 再犯會被當場擋下；附 9 種驗證一鍵跑",
+  "author": {
+    "name": "lee851104"
+  },
+  "types": "./types/index.d.ts"
+}
